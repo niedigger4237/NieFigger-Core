@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"runtime"
 	"sort"
 
 	"github.com/sagernet/netlink"
@@ -15,6 +16,8 @@ import (
 // No kernel mutation, no changes to NativeTun.options or its live TUN fd.
 type rootTetherPlan struct {
 	next Options
+	oldRules, newRules []*netlink.Rule
+	oldRoutes, newRoutes []netlink.Route
 	addRules, removeRules []*netlink.Rule
 	addRoutes, removeRoutes []netlink.Route
 }
@@ -114,6 +117,8 @@ func planRootTetherRefresh(current Options, link netlink.Link, base, oldDynamic,
 	if current.Name != "asterisk0" || !current.AutoRoute || current.AutoRedirectMarkMode ||
 		current.FileDescriptor != 0 || current.EXP_ExternalConfiguration || current.NetNs != "" ||
 		current.IPRoute2TableIndex <= 0 || current.IPRoute2RuleIndex <= 0 ||
+		current.IPRoute2TableIndex == 253 || current.IPRoute2TableIndex == 254 || current.IPRoute2TableIndex == 255 ||
+		(runtime.GOOS == "android" && current.InterfaceMonitor == nil) ||
 		len(current.ExcludeInterface) != 0 || len(current.IncludeInterface) == 0 ||
 		current.IncludeInterface[0] != "lo" || link == nil || link.Attrs().Index <= 0 ||
 		link.Attrs().Name != current.Name {
@@ -140,7 +145,7 @@ func planRootTetherRefresh(current Options, link netlink.Link, base, oldDynamic,
 	// Generate using isolated instances: do not mutate the running NativeTun.
 	oldTun, newTun := &NativeTun{options: current}, &NativeTun{options: next}
 	oldRules, newRules := oldTun.rules(), newTun.rules()
-	p := &rootTetherPlan{next: next,
+	p := &rootTetherPlan{next: next, oldRules: oldRules, newRules: newRules,
 		addRules: rootTetherDifference(newRules, oldRules),
 		removeRules: rootTetherDifference(oldRules, newRules)}
 	for _, r := range p.addRules {
@@ -153,6 +158,7 @@ func planRootTetherRefresh(current Options, link netlink.Link, base, oldDynamic,
 	if err != nil { return nil, err }
 	newRoutes, err := newTun.routes(link)
 	if err != nil { return nil, err }
+	p.oldRoutes, p.newRoutes = oldRoutes, newRoutes
 	p.addRoutes = rootTetherDifference(newRoutes, oldRoutes)
 	p.removeRoutes = rootTetherDifference(oldRoutes, newRoutes)
 	return p, nil

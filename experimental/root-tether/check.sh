@@ -8,5 +8,5 @@ trap 'rm -rf "$TMP"' EXIT
 git clone -q --no-checkout https://github.com/sagernet/sing-tun.git "$TMP/sing-tun"
 git -C "$TMP/sing-tun" checkout -q --detach "$PIN"
 test "$(git -C "$TMP/sing-tun" rev-parse HEAD)" = "$PIN"
-cp "$ROOT/root_tether_linux.go" "$ROOT/root_tether_linux_test.go" "$TMP/sing-tun/"
-(cd "$TMP/sing-tun" && gofmt -w root_tether_linux*.go && go test -count=1 -run '^TestNieFiggerRootTether' .)
+cp "$ROOT"/root_tether*_linux*.go "$TMP/sing-tun/"
+(cd "$TMP/sing-tun" && gofmt -w root_tether*_linux*.go && go test -count=1 -run '^TestNieFiggerRootTether' .)
