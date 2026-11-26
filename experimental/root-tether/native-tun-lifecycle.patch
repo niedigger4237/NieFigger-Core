@@ -1,0 +1,95 @@
+diff --git a/tun_linux.go b/tun_linux.go
+--- a/tun_linux.go
++++ b/tun_linux.go
+@@ -33,8 +33,11 @@
+ 	tunFile             *os.File
+ 	iovecsOutputDefault []unix.Iovec
+ 	interfaceCallback   *list.Element[DefaultInterfaceUpdateCallback]
+-	options             Options
+-	ruleIndex6          []int
++	options             Options
++	ruleIndex6          []int
++	rootTetherMu sync.Mutex
++	rootTetherStarted, rootTetherClosed, rootTetherUncertain, rootTetherManaged bool
++	rootTetherIndex int
+ 	readAccess          sync.Mutex
+ 	writeAccess         sync.Mutex
+ 	vnetHdr             bool
+@@ -289,7 +292,12 @@
+ 	return unix.ByteSliceToString(ifr[:]), nil
+ }
+ 
+-func (t *NativeTun) Start() error {
++func (t *NativeTun) Start() (err error) {
++	t.rootTetherMu.Lock()
++	defer t.rootTetherMu.Unlock()
++	if t.rootTetherClosed { return os.ErrClosed }
++	if t.rootTetherStarted { return errors.New("native TUN already started") }
++	defer func() { if err == nil { t.rootTetherStarted = true } }()
+ 	if t.options.FileDescriptor == 0 {
+ 		if !t.options.EXP_ExternalConfiguration && t.options.NetNs == "" {
+ 			t.options.InterfaceMonitor.RegisterMyInterface(t.options.Name)
+@@ -365,15 +373,22 @@
+ 	}
+ 
+ 	if t.options.AutoRoute && runtime.GOOS == "android" {
+-		t.interfaceCallback = t.options.InterfaceMonitor.RegisterCallback(t.routeUpdate)
+-	}
+-	return nil
+-}
++		t.interfaceCallback = t.options.InterfaceMonitor.RegisterCallback(t.routeUpdate)
++	}
++	t.rootTetherIndex = tunLink.Attrs().Index
++	return nil
++}
+ 
+-func (t *NativeTun) Close() error {
+-	if t.interfaceCallback != nil {
+-		t.options.InterfaceMonitor.UnregisterCallback(t.interfaceCallback)
+-	}
++func (t *NativeTun) Close() error {
++	t.rootTetherMu.Lock()
++	defer t.rootTetherMu.Unlock()
++	if t.rootTetherClosed { return os.ErrClosed }
++	t.rootTetherClosed = true
++	t.rootTetherStarted = false
++	if t.interfaceCallback != nil {
++		t.options.InterfaceMonitor.UnregisterCallback(t.interfaceCallback)
++		t.interfaceCallback = nil
++	}
+ 	if t.options.EXP_ExternalConfiguration {
+ 		return common.Close(common.PtrOrNil(t.tunFile))
+ 	}
+@@ -620,7 +635,12 @@
+ 	}
+ }
+ 
+-func (t *NativeTun) UpdateRouteOptions(tunOptions Options) error {
++func (t *NativeTun) UpdateRouteOptions(tunOptions Options) error {
++	t.rootTetherMu.Lock()
++	defer t.rootTetherMu.Unlock()
++	if t.rootTetherClosed { return os.ErrClosed }
++	if t.rootTetherUncertain { return errRootTetherUncertain }
++	if t.rootTetherManaged { return errors.New("managed ROOT TUN requires tether refresh or restart") }
+ 	if t.options.FileDescriptor > 0 {
+ 		return nil
+ 	} else if t.options.EXP_ExternalConfiguration {
+@@ -1202,10 +1222,14 @@
+ }
+ 
+ func (t *NativeTun) routeUpdate(_ *control.Interface, flags int) {
+-	if flags&FlagAndroidVPNUpdate == 0 {
+-		return
+-	}
+-	err := t.resetRules()
++	if flags&FlagAndroidVPNUpdate == 0 {
++		return
++	}
++	t.rootTetherMu.Lock()
++	defer t.rootTetherMu.Unlock()
++	// Monitor.emit can retain callbacks even after unregistering them.
++	if t.rootTetherClosed || !t.rootTetherStarted || t.rootTetherUncertain { return }
++	err := t.resetRules()
+ 	if err != nil {
+ 		if t.options.Logger != nil {
+ 			t.options.Logger.Error(E.Cause(err, "reset route"))
